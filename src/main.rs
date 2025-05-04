@@ -186,6 +186,137 @@ fn print_table(result: &AnalysisResult, threshold: u32) {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn create_test_python_file(dir: &TempDir, name: &str, content: &str) -> PathBuf {
+        let file_path = dir.path().join(name);
+        // Ensure parent directory exists
+        if let Some(parent) = file_path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(&file_path, content).unwrap();
+        file_path
+    }
+
+    #[test]
+    fn test_calculate_complexity_simple() {
+        let source = r#"
+def simple_function():
+    return True
+
+def complex_function():
+    if True:
+        for i in range(10):
+            while i > 0:
+                try:
+                    with open('file.txt') as f:
+                        if i % 2 == 0 and i > 5:
+                            pass
+                except Exception:
+                    pass
+"#;
+        let results = calculate_complexity(source).unwrap();
+        assert_eq!(results.len(), 2);
+        
+        let simple = results.iter().find(|f| f.name == "simple_function").unwrap();
+        assert_eq!(simple.complexity, 1);
+        
+        let complex = results.iter().find(|f| f.name == "complex_function").unwrap();
+        assert_eq!(complex.complexity, 9); // 1 base + 1 if + 1 for + 1 while + 1 try + 1 with + 1 if + 1 and + 1 except
+    }
+
+    #[test]
+    fn test_analyze_directory() {
+        let temp_dir = TempDir::new().unwrap();
+        
+        create_test_python_file(
+            &temp_dir,
+            "simple.py",
+            r#"
+def simple():
+    return True
+"#,
+        );
+        
+        create_test_python_file(
+            &temp_dir,
+            "complex.py",
+            r#"
+def complex():
+    if True:
+        for i in range(10):
+            while i > 0:
+                try:
+                    pass
+                except:
+                    pass
+"#,
+        );
+        
+        // Create a file in a subdirectory
+        create_test_python_file(
+            &temp_dir,
+            "subdir/nested.py",
+            r#"
+def nested():
+    if True and False:
+        pass
+"#,
+        );
+        
+        // Create a file that should be ignored
+        create_test_python_file(
+            &temp_dir,
+            "venv/ignored.py",
+            r#"
+def ignored():
+    pass
+"#,
+        );
+        
+        let result = analyze_directory(&temp_dir.path().to_path_buf(), 5).unwrap();
+        
+        assert_eq!(result.functions.len(), 3);
+        assert!(result.summary.is_some());
+        
+        let summary = result.summary.unwrap();
+        assert_eq!(summary.total_functions, 3);
+        assert_eq!(summary.functions_above_threshold, 1);
+        
+        // Verify the complex function is above threshold
+        let complex = result.functions.iter().find(|f| f.name == "complex").unwrap();
+        assert!(complex.complexity > 5);
+    }
+
+    #[test]
+    fn test_output_formats() {
+        let temp_dir = TempDir::new().unwrap();
+        create_test_python_file(
+            &temp_dir,
+            "test.py",
+            r#"
+def test():
+    if True:
+        pass
+"#,
+        );
+        
+        let result = analyze_directory(&temp_dir.path().to_path_buf(), 1).unwrap();
+        
+        // Test JSON serialization
+        let json = serde_json::to_string_pretty(&result).unwrap();
+        assert!(json.contains("test"));
+        assert!(json.contains("complexity"));
+        
+        // Test table output (we can't easily test the actual output, but we can verify it doesn't panic)
+        print_table(&result, 1);
+    }
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
     let result = analyze_directory(&args.path, args.threshold)?;
